@@ -145,26 +145,51 @@ CREATE TRIGGER on_auth_user_created
     AFTER INSERT ON auth.users
     FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();
 
--- Trigger: Automatically make organization creator the Tenant Owner (Atomic)
-CREATE OR REPLACE FUNCTION public.handle_new_organization()
-RETURNS trigger AS $$
-BEGIN
-    -- Only auto-insert owner if trigger is fired from an authenticated client session
-    IF auth.uid() IS NOT NULL THEN
-        INSERT INTO public.organization_members (organization_id, profile_id, role)
-        VALUES (new.id, auth.uid(), 'owner');
-    END IF;
-    RETURN new;
-END;
-$$ LANGUAGE plpgsql SECURITY DEFINER;
-
-CREATE TRIGGER on_organization_created
-    AFTER INSERT ON public.organizations
-    FOR EACH ROW EXECUTE FUNCTION public.handle_new_organization();
+-- (Removed handle_new_organization trigger in favor of atomic public.create_organization RPC)
 
 -- ----------------------------------------------------------
 -- 4. RPC / API FUNCTIONS (High Security Encapsulation)
 -- ----------------------------------------------------------
+
+-- Safe API Create: Create organization and assign creator as owner atomically
+CREATE OR REPLACE FUNCTION public.create_organization(org_name TEXT, org_slug TEXT)
+RETURNS json SECURITY DEFINER AS $$
+DECLARE
+    new_org_id UUID;
+    invite_code_val TEXT;
+    user_id UUID;
+BEGIN
+    -- Validate current session
+    user_id := auth.uid();
+    IF user_id IS NULL THEN
+        RAISE EXCEPTION 'Authentication required to create an organization';
+    END IF;
+
+    -- Generate a unique invite code (upper case hex, 8 characters)
+    invite_code_val := upper(substring(md5(random()::text) from 1 for 8));
+    
+    -- Ensure uniqueness of invite_code
+    WHILE EXISTS (SELECT 1 FROM public.organizations WHERE invite_code = invite_code_val) LOOP
+        invite_code_val := upper(substring(md5(random()::text) from 1 for 8));
+    END LOOP;
+
+    -- Insert organization
+    INSERT INTO public.organizations (name, slug, invite_code)
+    VALUES (org_name, org_slug, invite_code_val)
+    RETURNING id INTO new_org_id;
+
+    -- Insert membership (creator is owner)
+    INSERT INTO public.organization_members (organization_id, profile_id, role)
+    VALUES (new_org_id, user_id, 'owner');
+
+    RETURN json_build_object(
+        'success', true,
+        'organization_id', new_org_id,
+        'organization_name', org_name,
+        'invite_code', invite_code_val
+    );
+END;
+$$ LANGUAGE plpgsql;
 
 -- Safe API Join: Check invite code and register member atomically
 CREATE OR REPLACE FUNCTION public.join_organization(invite_code_param TEXT)

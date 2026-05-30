@@ -15,32 +15,14 @@ export async function createOrganization(state: { error?: string } | null, formD
     return { error: 'Organization name and URL slug are required' };
   }
 
-  // Generate an atomic alphanumeric invite code (8 chars)
-  const inviteCode = crypto.randomBytes(4).toString('hex').toUpperCase();
+  // Call the secure RPC function to create the organization atomically
+  const { data, error: rpcError } = await supabase.rpc('create_organization', {
+    org_name: name,
+    org_slug: slug.toLowerCase().trim(),
+  });
 
-  // 1. Get authenticated user
-  const {
-    data: { user },
-    error: userError,
-  } = await supabase.auth.getUser();
-
-  if (userError || !user) {
-    return { error: 'Authentication required to create an organization' };
-  }
-
-  // 2. Insert organization (the DB trigger automatically creates the owner member record)
-  const { data: org, error: orgError } = await supabase
-    .from('organizations')
-    .insert({
-      name,
-      slug: slug.toLowerCase().trim(),
-      invite_code: inviteCode,
-    })
-    .select('id')
-    .single();
-
-  if (orgError) {
-    return { error: `Failed to create organization: ${orgError.message}` };
+  if (rpcError) {
+    return { error: `Failed to create organization: ${rpcError.message}` };
   }
 
   revalidatePath('/', 'layout');
