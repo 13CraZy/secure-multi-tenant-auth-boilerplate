@@ -28,7 +28,7 @@ export async function createOrganization(state: { error?: string } | null, formD
     return { error: 'Authentication required to create an organization' };
   }
 
-  // 2. Insert organization
+  // 2. Insert organization (the DB trigger automatically creates the owner member record)
   const { data: org, error: orgError } = await supabase
     .from('organizations')
     .insert({
@@ -41,17 +41,6 @@ export async function createOrganization(state: { error?: string } | null, formD
 
   if (orgError) {
     return { error: `Failed to create organization: ${orgError.message}` };
-  }
-
-  // 3. Create membership (creator is the Owner)
-  const { error: memberError } = await supabase.from('organization_members').insert({
-    organization_id: org.id,
-    profile_id: user.id,
-    role: 'owner',
-  });
-
-  if (memberError) {
-    return { error: `Failed to create organization owner membership: ${memberError.message}` };
   }
 
   revalidatePath('/', 'layout');
@@ -79,31 +68,13 @@ export async function joinOrganization(state: { error?: string } | null, formDat
     return { error: 'Authentication required to join an organization' };
   }
 
-  // 2. Find the organization matching the invite code
-  const { data: org, error: orgError } = await supabase
-    .from('organizations')
-    .select('id, name')
-    .eq('invite_code', cleanCode)
-    .limit(1)
-    .maybeSingle();
-
-  if (orgError || !org) {
-    return { error: 'Invalid invite code. Organization not found' };
-  }
-
-  // 3. Create member record for the user (role = member)
-  const { error: memberError } = await supabase.from('organization_members').insert({
-    organization_id: org.id,
-    profile_id: user.id,
-    role: 'member',
+  // 2. Securely join organization via RPC (Stored Procedure) to avoid RLS recursion and leaks
+  const { error: joinError } = await supabase.rpc('join_organization', {
+    invite_code_param: cleanCode,
   });
 
-  if (memberError) {
-    // If user is already a member, Postgres will return a unique constraint error
-    if (memberError.code === '23505') {
-      return { error: 'You are already a member of this organization' };
-    }
-    return { error: `Failed to join organization: ${memberError.message}` };
+  if (joinError) {
+    return { error: joinError.message };
   }
 
   revalidatePath('/', 'layout');
